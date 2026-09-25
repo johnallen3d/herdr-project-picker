@@ -1,0 +1,29 @@
+id = "herdr.project-picker"
+name = "Project Picker"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Persistent project bookmarks for Herdr"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "open"
+title = "Open project"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-project-picker", "open"]
+
+[[actions]]
+id = "add-current"
+title = "Add current workspace as project"
+contexts = ["workspace"]
+command = ["./target/release/herdr-project-picker", "add-current"]
+
+[[panes]]
+id = "picker"
+title = "Projects"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["./target/release/herdr-project-picker", "picker"]
