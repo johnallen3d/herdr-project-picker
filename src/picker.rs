@@ -5,12 +5,14 @@ use crate::{
 use eyre::{bail, eyre, Result, WrapErr};
 use std::{
     collections::{HashMap, HashSet},
+    env,
     ffi::OsStr,
     io::Write,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     process::{Command, Stdio},
 };
+use unicode_width::UnicodeWidthChar;
 
 pub struct Entry {
     pub name: String,
@@ -19,11 +21,19 @@ pub struct Entry {
     pub exists: bool,
     pub pinned: bool,
     pub worktree: bool,
+    pub repo: Option<PathBuf>,
+    pub branch: Option<String>,
+}
+
+struct GitWorktree {
+    path: PathBuf,
+    repo: PathBuf,
+    branch: Option<String>,
 }
 
 // Discover worktrees attached to repositories represented by a saved project or open space.
 // Git's NUL-delimited porcelain output supports spaces and newlines in worktree paths.
-fn worktrees(roots: &[PathBuf]) -> Vec<PathBuf> {
+fn worktrees(roots: &[PathBuf]) -> Vec<GitWorktree> {
     let mut seen_repos = HashSet::new();
     let mut paths = Vec::new();
     for root in roots {
@@ -50,7 +60,7 @@ fn worktrees(roots: &[PathBuf]) -> Vec<PathBuf> {
         let Ok(common) = common.canonicalize() else {
             continue;
         };
-        if !seen_repos.insert(common) {
+        if !seen_repos.insert(common.clone()) {
             continue;
         }
         let Ok(output) = Command::new("git")
@@ -64,10 +74,25 @@ fn worktrees(roots: &[PathBuf]) -> Vec<PathBuf> {
         if !output.status.success() {
             continue;
         }
+        let mut current: Option<GitWorktree> = None;
         for field in output.stdout.split(|b| *b == 0) {
             if let Some(path) = field.strip_prefix(b"worktree ") {
-                paths.push(PathBuf::from(OsStr::from_bytes(path)));
+                if let Some(tree) = current.take() {
+                    paths.push(tree);
+                }
+                current = Some(GitWorktree {
+                    path: PathBuf::from(OsStr::from_bytes(path)),
+                    repo: common.clone(),
+                    branch: None,
+                });
+            } else if let Some(branch) = field.strip_prefix(b"branch refs/heads/") {
+                if let Some(tree) = &mut current {
+                    tree.branch = Some(String::from_utf8_lossy(branch).into_owned());
+                }
             }
+        }
+        if let Some(tree) = current {
+            paths.push(tree);
         }
     }
     paths
@@ -91,6 +116,8 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             workspace_id: None,
             pinned: true,
             worktree: false,
+            repo: None,
+            branch: None,
         });
     }
     for workspace in workspaces {
@@ -118,12 +145,20 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             workspace_id: Some(workspace.workspace_id.clone()),
             pinned: false,
             worktree: false,
+            repo: None,
+            branch: None,
         });
     }
-    for path in worktrees(&roots) {
-        let path = normalize(&path.to_string_lossy(), &base)?;
+    let mut trees = worktrees(&roots);
+    for tree in &mut trees {
+        tree.path = normalize(&tree.path.to_string_lossy(), &base)?;
+    }
+    for tree in &trees {
+        let path = tree.path.clone();
         if let Some(index) = by_path.get(&path) {
             entries[*index].worktree = true;
+            entries[*index].repo = Some(tree.repo.clone());
+            entries[*index].branch = tree.branch.clone();
             continue;
         }
         by_path.insert(path.clone(), entries.len());
@@ -137,36 +172,138 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             workspace_id: None,
             pinned: false,
             worktree: true,
+            repo: Some(tree.repo.clone()),
+            branch: tree.branch.clone(),
         });
+    }
+    // A pane may have cd'd into a subdirectory of its worktree. Keep that
+    // space visible, grouped with its checkout, even when paths do not match.
+    for entry in &mut entries {
+        if entry.repo.is_some() {
+            continue;
+        }
+        if let Some(path) = &entry.path {
+            if let Some(tree) = trees
+                .iter()
+                .filter(|tree| path.starts_with(&tree.path))
+                .max_by_key(|tree| tree.path.components().count())
+            {
+                entry.repo = Some(tree.repo.clone());
+                entry.branch = tree.branch.clone();
+            }
+        }
     }
     Ok(entries)
 }
 
-fn display(entry: &Entry) -> String {
-    let mut tags = Vec::new();
-    if entry.pinned {
-        tags.push("project");
+// Keep entries from the same repository together without losing the saved
+// project order. Unrelated open spaces appear after saved projects.
+fn ordered(entries: &[Entry]) -> Vec<(usize, bool)> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !seen.insert(index) {
+            continue;
+        }
+        rows.push((index, false));
+        if let Some(repo) = &entry.repo {
+            for (other_index, other) in entries.iter().enumerate() {
+                if other_index != index
+                    && other.repo.as_ref() == Some(repo)
+                    && seen.insert(other_index)
+                {
+                    rows.push((other_index, true));
+                }
+            }
+        }
     }
-    if entry.workspace_id.is_some() {
-        tags.push("open");
+    rows
+}
+
+// Width is measured in terminal cells, not bytes, so Unicode names align.
+fn fit(text: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut used = 0;
+    let clean: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let total: usize = clean.chars().map(|ch| ch.width().unwrap_or(0)).sum();
+    for ch in clean.chars() {
+        let next = ch.width().unwrap_or(0);
+        if used + next > width || (total > width && used + next >= width) {
+            break;
+        }
+        result.push(ch);
+        used += next;
     }
-    if entry.worktree {
-        tags.push("worktree");
+    if total > width {
+        result.push('…');
+        used += 1;
     }
-    if !entry.exists && entry.workspace_id.is_none() {
-        tags.push("missing");
+    result.push_str(&" ".repeat(width.saturating_sub(used)));
+    result
+}
+
+fn fit_path(path: &str, width: usize) -> String {
+    let clean: String = path
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let total: usize = clean.chars().map(|ch| ch.width().unwrap_or(0)).sum();
+    if total <= width {
+        return fit(&clean, width);
     }
-    let path = entry
-        .path
-        .as_ref()
-        .map_or_else(|| "(cwd unavailable)".into(), |p| p.display().to_string());
-    // Remove control characters that could forge fzf records or display columns.
-    let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    let mut suffix = String::new();
+    let mut used = 1; // ellipsis
+    for ch in clean.chars().rev() {
+        let next = ch.width().unwrap_or(0);
+        if used + next > width {
+            break;
+        }
+        suffix.insert(0, ch);
+        used += next;
+    }
+    format!("…{suffix}")
+}
+
+fn display(entry: &Entry, child: bool) -> String {
+    let marker = if entry.workspace_id.is_some() {
+        '●'
+    } else if !entry.exists {
+        '!'
+    } else if entry.pinned {
+        '★'
+    } else {
+        ' '
+    };
+    let label = if child {
+        format!("  └ {}", entry.branch.as_deref().unwrap_or(&entry.name))
+    } else {
+        entry.name.clone()
+    };
+    let branch = if child {
+        ""
+    } else {
+        entry.branch.as_deref().unwrap_or("")
+    };
+    let path = entry.path.as_ref().map_or_else(
+        || "(cwd unavailable)".into(),
+        |path| {
+            let home = env::var_os("HOME").map(PathBuf::from);
+            home.and_then(|home| {
+                path.strip_prefix(home)
+                    .ok()
+                    .map(|relative| format!("~/{}", relative.display()))
+            })
+            .unwrap_or_else(|| path.display().to_string())
+        },
+    );
     format!(
-        "[{}] {}\t{}",
-        tags.join(", "),
-        clean(&entry.name),
-        clean(&path)
+        "{marker} {}  {}  {}",
+        fit(&label, 26),
+        fit(branch, 22),
+        fit_path(&path, 44)
     )
 }
 
@@ -178,7 +315,9 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             "--border=none",
             "--prompt=Projects> ",
             "--delimiter=\t",
-            "--with-nth=2..",
+            "--with-nth=2",
+            "--no-sort",
+            "--header=● open space   ★ saved project   ! missing directory   Enter: focus/open",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -193,9 +332,9 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             // Keep the popup open until the user dismisses it, rather than flashing away.
             writeln!(input, "0\tNo projects, open spaces, or worktrees found.")?;
         }
-        for (index, entry) in entries.iter().enumerate() {
+        for (index, child) in ordered(entries) {
             // Index is identity, not user-editable display name.
-            writeln!(input, "{index}\t{}", display(entry))?;
+            writeln!(input, "{index}\t{}", display(&entries[index], child))?;
         }
         Ok(())
     })();
@@ -285,6 +424,8 @@ mod tests {
             exists: true,
             pinned: true,
             worktree: false,
+            repo: None,
+            branch: None,
         };
         activate(&mock, &entry).unwrap();
         let closed = Entry {
@@ -383,7 +524,12 @@ mod tests {
         assert_eq!(result[3].path, None);
         assert_eq!(result[4].workspace_id.as_deref(), Some("w4"));
         assert!(result[4].worktree);
-        assert!(display(&result[4]).contains("worktree"));
+        assert_eq!(result[4].branch, None); // detached checkout
+        assert!(display(&result[4], true).contains("└ feature"));
+        assert_eq!(
+            ordered(&result),
+            vec![(0, false), (4, true), (1, false), (2, false), (3, false)]
+        );
         // A closed worktree is discovered through the configured repository.
         let closed = entries(&registry, &workspaces[..3]).unwrap();
         assert_eq!(
@@ -408,8 +554,26 @@ mod tests {
             Some(repo.canonicalize().unwrap().as_path())
         );
         assert!(from_linked[1].worktree);
+        let named = base.join("checkout-named-differently");
+        assert!(Command::new("git")
+            .args(["-C"])
+            .arg(&repo)
+            .args(["worktree", "add", "-q", "-b", "feature/named"])
+            .arg(&named)
+            .status()
+            .unwrap()
+            .success());
+        let from_linked = entries(&linked, &[]).unwrap();
+        let branch = from_linked
+            .iter()
+            .find(|entry| entry.path.as_deref() == Some(named.canonicalize().unwrap().as_path()))
+            .unwrap();
+        assert_eq!(branch.branch.as_deref(), Some("feature/named"));
+        assert!(display(branch, true).contains("└ feature/named"));
+        assert_eq!(fit("a界cdef", 4), "a界…");
+        assert_eq!(fit_path("/very/long/path/to/repo", 12), "…ath/to/repo");
         let work = Registry::load(file, "work").unwrap();
         assert!(entries(&work, &[]).unwrap().is_empty());
-        assert_eq!(entries(&work, &workspaces[..1]).unwrap().len(), 2);
+        assert_eq!(entries(&work, &workspaces[..1]).unwrap().len(), 3);
     }
 }
