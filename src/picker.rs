@@ -42,12 +42,6 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
 }
 
 pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
-    if entries.is_empty() {
-        println!(
-            "No projects registered. Add one with the add-current action or edit projects.toml."
-        );
-        return Ok(None);
-    }
     let mut child = Command::new("fzf")
         .args([
             "--height=100%",
@@ -66,6 +60,13 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             .stdin
             .take()
             .ok_or_else(|| eyre!("Cannot write to fzf"))?;
+        if entries.is_empty() {
+            // Keep the popup open until the user dismisses it, rather than flashing away.
+            writeln!(
+                input,
+                "0\tNo projects registered. Use Add current workspace as project or edit projects.toml."
+            )?;
+        }
         for (index, entry) in entries.iter().enumerate() {
             let marker = if !entry.exists {
                 "!"
@@ -96,6 +97,9 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
     }
     if !output.status.success() {
         bail!("fzf exited with {}", output.status);
+    }
+    if entries.is_empty() {
+        return Ok(None);
     }
     let selection = String::from_utf8(output.stdout)?;
     let Some(index) = selection
