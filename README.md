@@ -1,8 +1,8 @@
 # Herdr Project Picker
 
-Persistent project bookmarks for Herdr. Pick a project to focus its existing workspace or create one.
+A session-aware project picker for Herdr: saved projects, open spaces, and known Git worktrees in one searchable list. Selecting an open space focuses it; selecting a closed project or worktree creates a workspace at that path.
 
-Requires Herdr 0.9.1+ and `fzf` on `PATH`. Build and link locally:
+Requires Herdr 0.9.1+, `fzf`, and `git` on `PATH` for worktree discovery. Build and link locally:
 
 ```sh
 cargo build --release
@@ -35,6 +35,8 @@ path = "~/src/conditions"
 path = "~/src/work-repo"
 ```
 
-The picker and **Add current workspace as project** action use only the invoking session's projects. Projects persist after workspaces close. To migrate an older, unscoped `[[projects]]` file, change each heading to `[[sessions.personal.projects]]` (or whichever session should own it). If you used the earlier separate-file format, move each session's projects into sections in this single file.
+Saved projects are scoped to the invoking session and persist after workspaces close. The picker also shows **all open spaces in that session**, including those not configured as projects, plus Git worktrees attached to saved projects or open spaces. It does not scan the whole filesystem for repositories. Entries at the same directory are merged and labeled `project`, `open`, and/or `worktree`; `missing` entries cannot be opened. Open spaces with unavailable cwd are still focusable. Escape cancels. An empty list shows a dismissible message.
 
-`●` marks an open workspace; `!` marks a missing directory (cannot be opened). Escape cancels. An empty session shows a dismissible message instead of immediately closing the popup. **Add current workspace as project** registers the calling pane's cwd, without duplicates. `herdr-project-picker list` lists projects for the current session; outside Herdr, set `HERDR_SESSION=personal` (or `work`) and `HERDR_PLUGIN_CONFIG_DIR` to use it. Relative paths in the config resolve against its directory; `~` is supported. Herdr 0.9.1 does not expose workspace root cwd; matching uses the first pane cwd reported by the public API and registration uses the invoking pane cwd. If panes change directories, this may not match the originally created workspace. Programmatic edits atomically rewrite the TOML; comments and formatting are not preserved.
+**Add current workspace as project** registers the calling pane's cwd, without duplicates. `herdr-project-picker list` lists only saved projects for the current session; outside Herdr, set `HERDR_SESSION=personal` (or `work`) and `HERDR_PLUGIN_CONFIG_DIR` to use it. To migrate an older, unscoped `[[projects]]` file, change each heading to `[[sessions.personal.projects]]` (or whichever session should own it). If you used the earlier separate-file format, move each session's projects into sections in this single file.
+
+Relative paths in the config resolve against its directory; `~` is supported. Herdr 0.9.1 does not expose workspace root cwd; matching uses the first pane cwd reported by the public API and registration uses the invoking pane cwd. If panes change directories, this may not match the originally created workspace. Programmatic edits atomically rewrite the TOML; comments and formatting are not preserved.
