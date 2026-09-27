@@ -287,23 +287,38 @@ fn display(entry: &Entry, child: bool) -> String {
     } else {
         entry.branch.as_deref().unwrap_or("")
     };
+    // The name and branch are the primary information; location is only context.
+    // Avoid repeating the basename when it is already the visible label.
     let path = entry.path.as_ref().map_or_else(
         || "(cwd unavailable)".into(),
         |path| {
+            let location = if path
+                .file_name()
+                .is_some_and(|name| name == entry.name.as_str())
+            {
+                path.parent().unwrap_or(path)
+            } else {
+                path.as_path()
+            };
             let home = env::var_os("HOME").map(PathBuf::from);
             home.and_then(|home| {
-                path.strip_prefix(home)
+                location
+                    .strip_prefix(home)
                     .ok()
                     .map(|relative| format!("~/{}", relative.display()))
             })
-            .unwrap_or_else(|| path.display().to_string())
+            .unwrap_or_else(|| location.display().to_string())
         },
     );
+    let branch = if branch.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", fit(branch, 22).trim_end())
+    };
     format!(
-        "{marker} {}  {}  {}",
-        fit(&label, 26),
-        fit(branch, 22),
-        fit_path(&path, 44)
+        "{marker} {}{branch}  \x1b[2m{}\x1b[0m",
+        fit(&label, 36).trim_end(),
+        fit_path(&path, 32).trim_end()
     )
 }
 
@@ -316,6 +331,7 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             "--prompt=Projects> ",
             "--delimiter=\t",
             "--with-nth=2",
+            "--ansi",
             "--no-sort",
             "--header=● open space   ★ saved project   ! missing directory   Enter: focus/open",
         ])
@@ -397,6 +413,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn path_is_secondary_to_name_and_branch() {
+        let entry = Entry {
+            name: "calculate".into(),
+            path: Some(PathBuf::from("/very/long/parent/calculate")),
+            workspace_id: None,
+            exists: true,
+            pinned: true,
+            worktree: false,
+            repo: None,
+            branch: Some("main".into()),
+        };
+        let line = display(&entry, false);
+        assert!(line.contains("★ calculate  [main]"));
+        assert!(line.contains("\x1b[2m/very/long/parent\x1b[0m"));
+        assert!(!line.contains("/very/long/parent/calculate"));
     }
 
     #[test]
