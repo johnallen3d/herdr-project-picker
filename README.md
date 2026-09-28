@@ -9,6 +9,16 @@ cargo build --release
 herdr plugin link .
 ```
 
+For a fast UI test without committing, pushing, or rebuilding Nix, run the local debug binary against your running session and existing project config:
+
+```sh
+HERDR_SESSION=personal \
+HERDR_PLUGIN_CONFIG_DIR="$(herdr plugin config-dir herdr.project-picker)" \
+cargo run -- picker
+```
+
+This opens the picker in your current terminal, without replacing the installed plugin. Press Escape to dismiss it; Enter still focuses or creates a workspace. Change `personal` to the session you want to preview.
+
 For GitHub installation, the manifest builds the release binary with Cargo. Add a keybinding to Herdr's `config.toml`:
 
 ```toml
@@ -35,7 +45,7 @@ path = "~/src/conditions"
 path = "~/src/work-repo"
 ```
 
-Saved projects are scoped to the invoking session and persist after workspaces close. The picker also shows **all open spaces in that session**, including those not configured as projects, plus Git worktrees attached to saved projects or open spaces. It does not scan the whole filesystem for repositories. Entries at the same directory are merged. Git worktrees are grouped under their saved project or open repository. The picker emphasizes name and branch; a dimmed, shortened location follows for context. `●` means the space is open (selection focuses it), `★` is a saved project that is not open, and `!` is a missing directory (cannot be opened). Open spaces with unavailable cwd are still focusable. Escape cancels. An empty list shows a dismissible message.
+Saved projects are scoped to the invoking session and persist after workspaces close. The picker also shows **all open spaces in that session**, including those not configured as projects, plus Git worktrees attached to saved projects or open spaces. It does not scan the whole filesystem for repositories. Entries at the same directory are merged. Git worktrees are grouped under their saved project or open repository. The picker shows and searches project names and branches, never paths. Matches retain project/worktree order. `●` means the space is open (selection focuses it), `★` is a saved project that is not open, and `!` is a missing directory (cannot be opened). Open spaces with unavailable cwd are still focusable. Escape cancels. An empty list shows a dismissible message.
 
 **Add current workspace as project** registers the calling pane's cwd, without duplicates. `herdr-project-picker list` lists only saved projects for the current session; outside Herdr, set `HERDR_SESSION=personal` (or `work`) and `HERDR_PLUGIN_CONFIG_DIR` to use it. To migrate an older, unscoped `[[projects]]` file, change each heading to `[[sessions.personal.projects]]` (or whichever session should own it). If you used the earlier separate-file format, move each session's projects into sections in this single file.
 

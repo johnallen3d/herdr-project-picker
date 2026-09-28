@@ -5,7 +5,6 @@ use crate::{
 use eyre::{bail, eyre, Result, WrapErr};
 use std::{
     collections::{HashMap, HashSet},
-    env,
     ffi::OsStr,
     io::Write,
     os::unix::ffi::OsStrExt,
@@ -245,28 +244,6 @@ fn fit(text: &str, width: usize) -> String {
     result
 }
 
-fn fit_path(path: &str, width: usize) -> String {
-    let clean: String = path
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    let total: usize = clean.chars().map(|ch| ch.width().unwrap_or(0)).sum();
-    if total <= width {
-        return fit(&clean, width);
-    }
-    let mut suffix = String::new();
-    let mut used = 1; // ellipsis
-    for ch in clean.chars().rev() {
-        let next = ch.width().unwrap_or(0);
-        if used + next > width {
-            break;
-        }
-        suffix.insert(0, ch);
-        used += next;
-    }
-    format!("…{suffix}")
-}
-
 fn display(entry: &Entry, child: bool) -> String {
     let marker = if entry.workspace_id.is_some() {
         '●'
@@ -287,38 +264,11 @@ fn display(entry: &Entry, child: bool) -> String {
     } else {
         entry.branch.as_deref().unwrap_or("")
     };
-    // The name and branch are the primary information; location is only context.
-    // Avoid repeating the basename when it is already the visible label.
-    let path = entry.path.as_ref().map_or_else(
-        || "(cwd unavailable)".into(),
-        |path| {
-            let location = if path
-                .file_name()
-                .is_some_and(|name| name == entry.name.as_str())
-            {
-                path.parent().unwrap_or(path)
-            } else {
-                path.as_path()
-            };
-            let home = env::var_os("HOME").map(PathBuf::from);
-            home.and_then(|home| {
-                location
-                    .strip_prefix(home)
-                    .ok()
-                    .map(|relative| format!("~/{}", relative.display()))
-            })
-            .unwrap_or_else(|| location.display().to_string())
-        },
-    );
-    let branch = if branch.is_empty() {
-        String::new()
-    } else {
-        format!("  [{}]", fit(branch, 22).trim_end())
-    };
+    // Only names and branches are displayed and searched; paths are activation data.
     format!(
-        "{marker} {}{branch}  \x1b[2m{}\x1b[0m",
-        fit(&label, 36).trim_end(),
-        fit_path(&path, 32).trim_end()
+        "{marker} {}  {}",
+        fit(&label, 26),
+        fit(branch, 22).trim_end()
     )
 }
 
@@ -331,7 +281,6 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             "--prompt=Projects> ",
             "--delimiter=\t",
             "--with-nth=2",
-            "--ansi",
             "--no-sort",
             "--header=● open space   ★ saved project   ! missing directory   Enter: focus/open",
         ])
@@ -416,10 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn path_is_secondary_to_name_and_branch() {
+    fn rows_align_and_never_expose_or_search_paths() {
         let entry = Entry {
-            name: "calculate".into(),
-            path: Some(PathBuf::from("/very/long/parent/calculate")),
+            name: "custom project".into(),
+            path: Some(PathBuf::from("/very/long/parent/checkout")),
             workspace_id: None,
             exists: true,
             pinned: true,
@@ -427,10 +376,33 @@ mod tests {
             repo: None,
             branch: Some("main".into()),
         };
-        let line = display(&entry, false);
-        assert!(line.contains("★ calculate  [main]"));
-        assert!(line.contains("\x1b[2m/very/long/parent\x1b[0m"));
-        assert!(!line.contains("/very/long/parent/calculate"));
+        let row = display(&entry, false);
+        assert!(row.contains("★ custom project"));
+        assert!(row.contains("main"));
+        assert!(!row.contains("checkout"));
+        assert!(!row.contains("/very/long/parent"));
+        let other = Entry {
+            name: "checkout".into(),
+            path: Some(PathBuf::from("/other/parent/checkout")),
+            branch: None,
+            ..entry
+        };
+        let other_row = display(&other, false);
+        let column = row.split_once("main").unwrap().0;
+        assert_eq!(
+            column
+                .chars()
+                .map(|ch| ch.width().unwrap_or(0))
+                .sum::<usize>(),
+            30
+        );
+        assert_eq!(
+            other_row
+                .chars()
+                .map(|ch| ch.width().unwrap_or(0))
+                .sum::<usize>(),
+            30
+        );
     }
 
     #[test]
@@ -605,7 +577,6 @@ mod tests {
         assert_eq!(branch.branch.as_deref(), Some("feature/named"));
         assert!(display(branch, true).contains("└ feature/named"));
         assert_eq!(fit("a界cdef", 4), "a界…");
-        assert_eq!(fit_path("/very/long/path/to/repo", 12), "…ath/to/repo");
         let work = Registry::load(file, "work").unwrap();
         assert!(entries(&work, &[]).unwrap().is_empty());
         assert_eq!(entries(&work, &workspaces[..1]).unwrap().len(), 3);
