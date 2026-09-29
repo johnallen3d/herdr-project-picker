@@ -255,15 +255,11 @@ fn display(entry: &Entry, child: bool) -> String {
         ' '
     };
     let label = if child {
-        format!("  └ {}", entry.branch.as_deref().unwrap_or(&entry.name))
+        format!("  └ {}", entry.name)
     } else {
         entry.name.clone()
     };
-    let branch = if child {
-        ""
-    } else {
-        entry.branch.as_deref().unwrap_or("")
-    };
+    let branch = entry.branch.as_deref().unwrap_or("");
     // Only names and branches are displayed and searched; paths are activation data.
     format!(
         "{marker} {}  {}",
@@ -402,6 +398,50 @@ mod tests {
                 .map(|ch| ch.width().unwrap_or(0))
                 .sum::<usize>(),
             30
+        );
+    }
+
+    #[test]
+    fn grouped_worktrees_prefer_names_and_keep_branches_secondary() {
+        let entry = Entry {
+            name: "checkout-name".into(),
+            path: Some(PathBuf::from("/parent/checkout-name")),
+            workspace_id: None,
+            exists: true,
+            pinned: false,
+            worktree: true,
+            repo: Some(PathBuf::from("/parent/repo/.git")),
+            branch: Some("feature/branch-name".into()),
+        };
+        assert_eq!(
+            display(&entry, true),
+            format!("  {}  feature/branch-name", fit("  └ checkout-name", 26))
+        );
+        let saved = Entry {
+            name: "custom name".into(),
+            pinned: true,
+            ..entry
+        };
+        assert_eq!(
+            display(&saved, true),
+            format!("★ {}  feature/branch-name", fit("  └ custom name", 26))
+        );
+        let open = Entry {
+            name: "open space".into(),
+            workspace_id: Some("w1".into()),
+            ..saved
+        };
+        assert_eq!(
+            display(&open, true),
+            format!("● {}  feature/branch-name", fit("  └ open space", 26))
+        );
+        let detached = Entry {
+            branch: None,
+            ..open
+        };
+        assert_eq!(
+            display(&detached, true),
+            format!("● {}  ", fit("  └ open space", 26))
         );
     }
 
@@ -575,7 +615,14 @@ mod tests {
             .find(|entry| entry.path.as_deref() == Some(named.canonicalize().unwrap().as_path()))
             .unwrap();
         assert_eq!(branch.branch.as_deref(), Some("feature/named"));
-        assert!(display(branch, true).contains("└ feature/named"));
+        assert_eq!(branch.name, "checkout-named-differently");
+        assert_eq!(
+            display(branch, true),
+            format!(
+                "  {}  feature/named",
+                fit("  └ checkout-named-differently", 26)
+            )
+        );
         assert_eq!(fit("a界cdef", 4), "a界…");
         let work = Registry::load(file, "work").unwrap();
         assert!(entries(&work, &[]).unwrap().is_empty());
