@@ -244,7 +244,39 @@ fn fit(text: &str, width: usize) -> String {
     result
 }
 
-fn display(entry: &Entry, child: bool) -> String {
+fn label(entry: &Entry, child: bool) -> String {
+    if child {
+        format!("  └ {}", entry.name)
+    } else {
+        entry.name.clone()
+    }
+}
+
+fn cell_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() {
+                1
+            } else {
+                ch.width().unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn display_rows(entries: &[Entry]) -> Vec<(usize, String)> {
+    let rows = ordered(entries);
+    let name_width = rows
+        .iter()
+        .map(|&(index, child)| cell_width(&label(&entries[index], child)))
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|(index, child)| (index, display(&entries[index], child, name_width)))
+        .collect()
+}
+
+fn display(entry: &Entry, child: bool, name_width: usize) -> String {
     let marker = if entry.workspace_id.is_some() {
         '●'
     } else if !entry.exists {
@@ -254,17 +286,14 @@ fn display(entry: &Entry, child: bool) -> String {
     } else {
         ' '
     };
-    let label = if child {
-        format!("  └ {}", entry.name)
-    } else {
-        entry.name.clone()
-    };
     let branch = entry.branch.as_deref().unwrap_or("");
+    // Pad names to the longest label, but never truncate either column ourselves.
+    // fzf owns the terminal viewport and horizontal scrolling on narrow popups.
     // Only names and branches are displayed and searched; paths are activation data.
     format!(
         "{marker} {}  {}",
-        fit(&label, 26),
-        fit(branch, 22).trim_end()
+        fit(&label(entry, child), name_width),
+        fit(branch, cell_width(branch)).trim_end()
     )
 }
 
@@ -293,9 +322,9 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             // Keep the popup open until the user dismisses it, rather than flashing away.
             writeln!(input, "0\tNo projects, open spaces, or worktrees found.")?;
         }
-        for (index, child) in ordered(entries) {
+        for (index, row) in display_rows(entries) {
             // Index is identity, not user-editable display name.
-            writeln!(input, "{index}\t{}", display(&entries[index], child))?;
+            writeln!(input, "{index}\t{row}")?;
         }
         Ok(())
     })();
@@ -372,7 +401,7 @@ mod tests {
             repo: None,
             branch: Some("main".into()),
         };
-        let row = display(&entry, false);
+        let row = display(&entry, false, 26);
         assert!(row.contains("★ custom project"));
         assert!(row.contains("main"));
         assert!(!row.contains("checkout"));
@@ -383,7 +412,7 @@ mod tests {
             branch: None,
             ..entry
         };
-        let other_row = display(&other, false);
+        let other_row = display(&other, false, 26);
         let column = row.split_once("main").unwrap().0;
         assert_eq!(
             column
@@ -402,6 +431,49 @@ mod tests {
     }
 
     #[test]
+    fn columns_expand_to_preserve_long_names_and_branches() {
+        let branch = "fix/task-queue-crash-in-debug-mode-after-resize";
+        let long_name = "界-worktree-name-that-exceeds-the-old-column-limit";
+        let entries = vec![
+            Entry {
+                name: "repo".into(),
+                path: Some(PathBuf::from("/hidden/repo")),
+                workspace_id: None,
+                exists: true,
+                pinned: true,
+                worktree: true,
+                repo: Some(PathBuf::from("/hidden/repo/.git")),
+                branch: Some("main".into()),
+            },
+            Entry {
+                name: long_name.into(),
+                path: Some(PathBuf::from("/hidden/worktree")),
+                workspace_id: None,
+                exists: true,
+                pinned: false,
+                worktree: true,
+                repo: Some(PathBuf::from("/hidden/repo/.git")),
+                branch: Some(branch.into()),
+            },
+        ];
+        let rows = display_rows(&entries);
+        assert_eq!(rows.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(rows[1].1.contains(&format!("└ {long_name}")));
+        assert!(rows[1].1.ends_with(branch));
+        let branch_column = cell_width(&rows[0].1[..rows[0].1.find("main").unwrap()]);
+        assert_eq!(
+            branch_column,
+            cell_width(&rows[1].1[..rows[1].1.find(branch).unwrap()])
+        );
+        assert_eq!(branch_column, 4 + cell_width(&format!("  └ {long_name}")));
+        for (_, row) in rows {
+            assert!(!row.contains('…'));
+            assert!(!row.contains("/hidden"));
+        }
+        assert!(display_rows(&[]).is_empty());
+    }
+
+    #[test]
     fn grouped_worktrees_prefer_names_and_keep_branches_secondary() {
         let entry = Entry {
             name: "checkout-name".into(),
@@ -414,7 +486,7 @@ mod tests {
             branch: Some("feature/branch-name".into()),
         };
         assert_eq!(
-            display(&entry, true),
+            display(&entry, true, 26),
             format!("  {}  feature/branch-name", fit("  └ checkout-name", 26))
         );
         let saved = Entry {
@@ -423,7 +495,7 @@ mod tests {
             ..entry
         };
         assert_eq!(
-            display(&saved, true),
+            display(&saved, true, 26),
             format!("★ {}  feature/branch-name", fit("  └ custom name", 26))
         );
         let open = Entry {
@@ -432,7 +504,7 @@ mod tests {
             ..saved
         };
         assert_eq!(
-            display(&open, true),
+            display(&open, true, 26),
             format!("● {}  feature/branch-name", fit("  └ open space", 26))
         );
         let detached = Entry {
@@ -440,7 +512,7 @@ mod tests {
             ..open
         };
         assert_eq!(
-            display(&detached, true),
+            display(&detached, true, 26),
             format!("● {}  ", fit("  └ open space", 26))
         );
     }
@@ -571,7 +643,7 @@ mod tests {
         assert_eq!(result[4].workspace_id.as_deref(), Some("w4"));
         assert!(result[4].worktree);
         assert_eq!(result[4].branch, None); // detached checkout
-        assert!(display(&result[4], true).contains("└ feature"));
+        assert!(display(&result[4], true, 26).contains("└ feature"));
         assert_eq!(
             ordered(&result),
             vec![(0, false), (4, true), (1, false), (2, false), (3, false)]
@@ -617,7 +689,7 @@ mod tests {
         assert_eq!(branch.branch.as_deref(), Some("feature/named"));
         assert_eq!(branch.name, "checkout-named-differently");
         assert_eq!(
-            display(branch, true),
+            display(branch, true, 26),
             format!(
                 "  {}  feature/named",
                 fit("  └ checkout-named-differently", 26)
