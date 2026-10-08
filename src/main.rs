@@ -33,8 +33,10 @@ fn run(action: Action, herdr: &Herdr) -> Result<()> {
             }
         }
         Action::Picker => {
-            let entries = picker::entries(&registry, &herdr.workspaces()?)?;
-            if let Some(index) = picker::select(&entries)? {
+            let mut entries = picker::entries(&registry, &herdr.workspaces()?)?;
+            let remote = herdr::discover_remote(herdr);
+            picker::append_remote(&mut entries, &remote.machines);
+            if let Some(index) = picker::select(&entries, &remote.warnings)? {
                 picker::activate(herdr, &entries[index])?;
             }
         }

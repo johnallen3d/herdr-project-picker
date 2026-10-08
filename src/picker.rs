@@ -1,6 +1,6 @@
 use crate::{
     config::{normalize, Registry},
-    herdr::{Workspace, WorkspaceControl},
+    herdr::{Machine, MachineWorkspaces, Workspace, WorkspaceControl},
 };
 use eyre::{bail, eyre, Result, WrapErr};
 use std::{
@@ -17,6 +17,7 @@ pub struct Entry {
     pub name: String,
     pub path: Option<PathBuf>,
     pub workspace_id: Option<String>,
+    pub machine: Option<Machine>,
     pub exists: bool,
     pub pinned: bool,
     pub worktree: bool,
@@ -113,6 +114,7 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             exists: path.is_dir(),
             path: Some(path),
             workspace_id: None,
+            machine: None,
             pinned: true,
             worktree: false,
             repo: None,
@@ -142,6 +144,7 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             exists: path.as_ref().is_some_and(|p| p.is_dir()),
             path,
             workspace_id: Some(workspace.workspace_id.clone()),
+            machine: None,
             pinned: false,
             worktree: false,
             repo: None,
@@ -169,6 +172,7 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
             exists: path.is_dir(),
             path: Some(path),
             workspace_id: None,
+            machine: None,
             pinned: false,
             worktree: true,
             repo: Some(tree.repo.clone()),
@@ -193,6 +197,26 @@ pub fn entries(registry: &Registry, workspaces: &[Workspace]) -> Result<Vec<Entr
         }
     }
     Ok(entries)
+}
+
+// Remote paths are metadata, not paths on this host. Do not normalize, stat,
+// merge, or run local Git against them, even if an identical local path exists.
+pub fn append_remote(entries: &mut Vec<Entry>, machines: &[MachineWorkspaces]) {
+    for remote in machines {
+        for workspace in &remote.workspaces {
+            entries.push(Entry {
+                name: workspace.label.clone(),
+                path: workspace.cwd.clone(),
+                workspace_id: Some(workspace.workspace_id.clone()),
+                machine: Some(remote.machine.clone()),
+                exists: true,
+                pinned: false,
+                worktree: false,
+                repo: None,
+                branch: None,
+            });
+        }
+    }
 }
 
 // Keep entries from the same repository together without losing the saved
@@ -271,8 +295,32 @@ fn display_rows(entries: &[Entry]) -> Vec<(usize, String)> {
         .map(|&(index, child)| cell_width(&label(&entries[index], child)))
         .max()
         .unwrap_or(0);
+    let show_machines = entries.iter().any(|entry| entry.machine.is_some());
+    let branch_width = entries
+        .iter()
+        .map(|entry| cell_width(entry.branch.as_deref().unwrap_or("")))
+        .max()
+        .unwrap_or(0);
     rows.into_iter()
-        .map(|(index, child)| (index, display(&entries[index], child, name_width)))
+        .map(|(index, child)| {
+            let entry = &entries[index];
+            let mut row = display(entry, child, name_width);
+            if show_machines {
+                // Machine is searchable; preserve the old single-machine layout
+                // when there are no remote spaces to display.
+                let machine = entry
+                    .machine
+                    .as_ref()
+                    .map(|m| m.label.as_str())
+                    .unwrap_or("Local");
+                row.push_str(&format!(
+                    "{}  [{}]",
+                    " ".repeat(branch_width - cell_width(entry.branch.as_deref().unwrap_or(""))),
+                    fit(machine, cell_width(machine))
+                ));
+            }
+            (index, row)
+        })
         .collect()
 }
 
@@ -297,7 +345,19 @@ fn display(entry: &Entry, child: bool, name_width: usize) -> String {
     )
 }
 
-pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
+pub fn select(entries: &[Entry], warnings: &[String]) -> Result<Option<usize>> {
+    let mut header =
+        String::from("● open space   ★ saved project   ! missing directory   Enter: focus/open");
+    if entries.iter().any(|entry| entry.machine.is_some()) {
+        header.push_str("\nRemote: focus server, then select machine in sidebar to view.");
+    }
+    if !warnings.is_empty() {
+        let warnings = warnings.join(" · ");
+        header.push_str(&format!(
+            "\n{} — local entries remain available",
+            fit(&warnings, cell_width(&warnings))
+        ));
+    }
     let mut child = Command::new("fzf")
         .args([
             "--height=100%",
@@ -307,8 +367,8 @@ pub fn select(entries: &[Entry]) -> Result<Option<usize>> {
             "--delimiter=\t",
             "--with-nth=2",
             "--no-sort",
-            "--header=● open space   ★ saved project   ! missing directory   Enter: focus/open",
         ])
+        .arg(format!("--header={header}"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -364,6 +424,13 @@ fn cancelled(code: Option<i32>) -> bool {
 }
 
 pub fn activate(herdr: &impl WorkspaceControl, entry: &Entry) -> Result<()> {
+    if let Some(machine) = &entry.machine {
+        let id = entry
+            .workspace_id
+            .as_deref()
+            .ok_or_else(|| eyre!("Remote entry has no workspace"))?;
+        return herdr.focus_remote_workspace(machine, id);
+    }
     if let Some(id) = &entry.workspace_id {
         return herdr.focus_workspace(id);
     }
@@ -390,11 +457,59 @@ mod tests {
     }
 
     #[test]
+    fn remote_spaces_keep_colliding_ids_and_paths_separate() {
+        let base = test_dir("remote");
+        let registry = Registry::load(base.join("projects.toml"), "personal").unwrap();
+        let local = Workspace {
+            workspace_id: "w1".into(),
+            label: "local repo".into(),
+            cwd: Some(base.clone()),
+        };
+        let mut entries = entries(&registry, std::slice::from_ref(&local)).unwrap();
+        let remote = |id: &str, label: &str| MachineWorkspaces {
+            machine: Machine {
+                id: id.into(),
+                label: label.into(),
+                enabled: true,
+            },
+            workspaces: vec![
+                Workspace {
+                    label: "remote repo".into(),
+                    ..local.clone()
+                },
+                Workspace {
+                    workspace_id: "w2".into(),
+                    label: "no cwd".into(),
+                    cwd: None,
+                },
+            ],
+        };
+        append_remote(
+            &mut entries,
+            &[remote("box-a", "Box A"), remote("box-b", "Box B")],
+        );
+        assert_eq!(entries.len(), 5);
+        assert!(entries[0].machine.is_none());
+        assert_eq!(entries[1].machine.as_ref().unwrap().id, "box-a");
+        assert_eq!(entries[3].machine.as_ref().unwrap().id, "box-b");
+        assert!(entries.iter().all(|entry| entry.repo.is_none()));
+        let rows = display_rows(&entries);
+        assert!(rows[0].1.contains("[Local]"));
+        assert!(rows[1].1.contains("[Box A]"));
+        assert!(rows[3].1.contains("[Box B]"));
+        assert!(rows
+            .iter()
+            .all(|(_, row)| row.starts_with('●')
+                && !row.contains(&base.to_string_lossy().to_string())));
+    }
+
+    #[test]
     fn rows_align_and_never_expose_or_search_paths() {
         let entry = Entry {
             name: "custom project".into(),
             path: Some(PathBuf::from("/very/long/parent/checkout")),
             workspace_id: None,
+            machine: None,
             exists: true,
             pinned: true,
             worktree: false,
@@ -439,6 +554,7 @@ mod tests {
                 name: "repo".into(),
                 path: Some(PathBuf::from("/hidden/repo")),
                 workspace_id: None,
+                machine: None,
                 exists: true,
                 pinned: true,
                 worktree: true,
@@ -449,6 +565,7 @@ mod tests {
                 name: long_name.into(),
                 path: Some(PathBuf::from("/hidden/worktree")),
                 workspace_id: None,
+                machine: None,
                 exists: true,
                 pinned: false,
                 worktree: true,
@@ -479,6 +596,7 @@ mod tests {
             name: "checkout-name".into(),
             path: Some(PathBuf::from("/parent/checkout-name")),
             workspace_id: None,
+            machine: None,
             exists: true,
             pinned: false,
             worktree: true,
@@ -526,6 +644,12 @@ mod tests {
                 self.0.borrow_mut().push(format!("focus {id}"));
                 Ok(())
             }
+            fn focus_remote_workspace(&self, machine: &Machine, id: &str) -> Result<()> {
+                self.0
+                    .borrow_mut()
+                    .push(format!("remote {} {id}", machine.id));
+                Ok(())
+            }
             fn create_workspace(&self, cwd: &Path, label: &str) -> Result<()> {
                 self.0
                     .borrow_mut()
@@ -539,6 +663,7 @@ mod tests {
             name: "tmp".into(),
             path: Some(dir.clone()),
             workspace_id: Some("w1".into()),
+            machine: None,
             exists: true,
             pinned: true,
             worktree: false,
@@ -567,6 +692,24 @@ mod tests {
         };
         activate(&mock, &no_cwd).unwrap();
         assert_eq!(mock.0.borrow().last().unwrap(), "focus w2");
+        let remote = Entry {
+            machine: Some(Machine {
+                id: "saved-id".into(),
+                label: "Remote".into(),
+                enabled: true,
+            }),
+            // This path is absent locally; focusing does not stat or create it.
+            path: Some(PathBuf::from("/remote-only/project")),
+            ..no_cwd
+        };
+        activate(&mock, &remote).unwrap();
+        assert_eq!(mock.0.borrow().last().unwrap(), "remote saved-id w2");
+        let invalid_remote = Entry {
+            workspace_id: None,
+            ..remote
+        };
+        assert!(activate(&mock, &invalid_remote).is_err());
+        assert_eq!(mock.0.borrow().last().unwrap(), "remote saved-id w2");
         assert!(cancelled(Some(130)));
         assert!(cancelled(Some(1)));
     }
