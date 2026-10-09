@@ -15,7 +15,7 @@ The picker includes open spaces from **enabled saved SSH machine profiles** retu
 
 Remote queries run concurrently with a ten-second timeout per machine. Disabled profiles are skipped; failed connections show a warning without hiding local entries. On older Herdr versions, unavailable machine discovery also leaves the local picker usable. The picker does not install, start, restart, or reconnect remote servers interactively.
 
-**Herdr 0.9.3 limitation:** selecting a remote row calls `herdr --machine <profile-id> workspace focus <workspace-id>` and shows a local notification. This focuses the remote server but **does not switch the visible client to that machine**; select the machine in Herdr's sidebar to view it. There is currently no public client-machine-switch API. The popup includes this reminder. Plugins themselves remain host-local; Herdr does not copy this plugin or its bookmarks to remote hosts.
+**Herdr 0.9.3 limitation:** selecting a remote row calls `herdr --machine <profile-id> workspace focus <workspace-id>` and shows a local notification. This focuses the remote server but **does not switch the visible client to that machine**; select the machine in Herdr's sidebar to view it. There is currently no public client-machine-switch API. Plugins themselves remain host-local; Herdr does not copy this plugin or its bookmarks to remote hosts.
 
 ### Local preview from the work profile
 

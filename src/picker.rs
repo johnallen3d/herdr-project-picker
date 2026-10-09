@@ -348,9 +348,6 @@ fn display(entry: &Entry, child: bool, name_width: usize) -> String {
 pub fn select(entries: &[Entry], warnings: &[String]) -> Result<Option<usize>> {
     let mut header =
         String::from("● open space   ★ saved project   ! missing directory   Enter: focus/open");
-    if entries.iter().any(|entry| entry.machine.is_some()) {
-        header.push_str("\nRemote: focus server, then select machine in sidebar to view.");
-    }
     if !warnings.is_empty() {
         let warnings = warnings.join(" · ");
         header.push_str(&format!(
